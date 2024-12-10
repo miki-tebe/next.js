@@ -449,7 +449,7 @@ pub enum LoaderItem {
 }
 
 #[turbo_tasks::value]
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum ModuleIdStrategy {
     Named,
@@ -1308,11 +1308,11 @@ impl NextConfig {
             .experimental
             .turbo
             .as_ref()
-            .and_then(|t| t.module_id_strategy.as_ref())
+            .and_then(|t| t.module_id_strategy)
         else {
             return Vc::cell(None);
         };
-        Vc::cell(Some(module_id_strategy.clone()))
+        Vc::cell(Some(module_id_strategy))
     }
 
     #[turbo_tasks::function]

@@ -13,13 +13,11 @@ use turbopack_core::{
 
 use crate::references::esm::EsmAsyncAssetReference;
 
-#[turbo_tasks::value]
-pub struct PreprocessedChildrenIdents {
-    // ident.to_string() -> full hash
-    // We save the full hash to avoid re-hashing in `merge_preprocessed_module_ids`
-    // if this endpoint did not change.
-    modules_idents: FxIndexMap<RcStr, u64>,
-}
+// ident.to_string() -> full hash
+// We save the full hash to avoid re-hashing in `merge_preprocessed_module_ids`
+// if this endpoint did not change.
+#[turbo_tasks::value(transparent)]
+pub struct PreprocessedChildrenIdents(FxIndexMap<RcStr, u64>);
 
 #[derive(Clone, Hash)]
 #[turbo_tasks::value(shared)]
@@ -104,10 +102,7 @@ pub async fn get_children_modules(
     parent: ResolvedVc<ReferencedModule>,
 ) -> Result<impl Iterator<Item = ResolvedVc<ReferencedModule>> + Send> {
     let parent_module = parent.await?.module();
-    let mut modules = referenced_modules(parent_module).await?.clone_value();
-    for module in parent_module.additional_layers_modules().await? {
-        modules.push(ReferencedModule::Module(*module).resolved_cell());
-    }
+    let modules = referenced_modules(parent_module).await?.clone_value();
     Ok(modules.into_iter())
 }
 
@@ -162,7 +157,7 @@ pub async fn children_modules_idents(
         }
     }
 
-    Ok(PreprocessedChildrenIdents { modules_idents }.cell())
+    Ok(Vc::cell(modules_idents))
 }
 
 const JS_MAX_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
@@ -175,7 +170,7 @@ pub async fn merge_preprocessed_module_ids(
     let mut merged_module_ids = FxIndexMap::default();
 
     for preprocessed_module_ids in preprocessed_module_ids {
-        for (module_ident, full_hash) in &preprocessed_module_ids.await?.modules_idents {
+        for (module_ident, full_hash) in &preprocessed_module_ids.await? {
             merged_module_ids.insert(module_ident.clone(), *full_hash);
         }
     }

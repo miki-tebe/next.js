@@ -29,13 +29,15 @@ use turbo_tasks::{
     CollectiblesSource, FxIndexMap, FxIndexSet, NonLocalValue, ReadRef, ResolvedVc,
     TryFlatJoinIterExt, TryJoinIterExt, ValueToString, Vc,
 };
+use turbo_tasks_hash::hash_xxh3_hash64;
 use turbopack_core::{
-    chunk::ChunkingType,
+    chunk::{module_id_strategies::GlobalModuleIdStrategy, ChunkingType},
     context::AssetContext,
     issue::{Issue, IssueExt},
     module::{Module, Modules},
     reference::primary_chunkable_referenced_modules,
 };
+use turbopack_ecmascript::global_module_id_strategy::merge_preprocessed_module_ids;
 
 use crate::{
     client_references::{map_client_references, ClientReferenceMapType, ClientReferencesSet},
@@ -617,6 +619,11 @@ async fn get_module_graph_for_endpoint(
     Ok(Vc::cell(graphs))
 }
 
+#[turbo_tasks::function]
+async fn get_module_graph_for_project(project: ResolvedVc<Project>) -> Vc<SingleModuleGraph> {
+    SingleModuleGraph::new_with_entries(project.get_all_entries())
+}
+
 #[turbo_tasks::value]
 pub struct NextDynamicGraph {
     is_single_page: bool,
@@ -1064,13 +1071,9 @@ async fn get_reduced_graphs_for_endpoint_inner(
         NextMode::Build => (
             false,
             vec![
-                async move {
-                    SingleModuleGraph::new_with_entries(project.get_all_entries())
-                        .to_resolved()
-                        .await
-                }
-                .instrument(tracing::info_span!("module graph for app"))
-                .await?,
+                async move { get_module_graph_for_project(project).to_resolved().await }
+                    .instrument(tracing::info_span!("module graph for app"))
+                    .await?,
             ],
         ),
     };
@@ -1138,4 +1141,36 @@ pub async fn get_reduced_graphs_for_endpoint(
         let _issues = result.take_collectibles::<Box<dyn Issue>>();
     }
     Ok(result)
+}
+
+/// Like get_reduced_graphs_for_endpoint, but may only be called for builds
+///
+/// If you can, use get_reduced_graphs_for_endpoint instead.
+#[turbo_tasks::function]
+pub async fn get_global_module_id_strategy(
+    project: Vc<Project>,
+) -> Result<Vc<GlobalModuleIdStrategy>> {
+    let graph_op = get_module_graph_for_project(project);
+    // TODO get rid of this function once everything inside of
+    // `get_reduced_graphs_for_endpoint_inner` calls `take_collectibles()` when needed
+    let graph = graph_op.strongly_consistent().await?;
+    let _ = graph_op.take_collectibles::<Box<dyn Issue>>();
+
+    let module_id_map: FxIndexMap<RcStr, u64> = graph
+        .iter_nodes()
+        .map(|node| async move {
+            let module_ident = node.module.ident();
+            let ident_str = module_ident.to_string().await?.clone_value();
+            let hash = hash_xxh3_hash64(&ident_str);
+            Ok((ident_str, hash))
+        })
+        .try_join()
+        .await?
+        .into_iter()
+        .collect();
+
+    // TODO clean up this call signature
+    let module_id_map = merge_preprocessed_module_ids(vec![Vc::cell(module_id_map)]).await?;
+
+    GlobalModuleIdStrategy::new(module_id_map).await
 }
