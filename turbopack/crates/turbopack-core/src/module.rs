@@ -15,10 +15,6 @@ pub trait Module: Asset {
     fn references(self: Vc<Self>) -> Vc<ModuleReferences> {
         ModuleReferences::empty()
     }
-
-    fn additional_layers_modules(self: Vc<Self>) -> Vc<Modules> {
-        Vc::cell(vec![])
-    }
 }
 
 #[turbo_tasks::value(transparent)]
