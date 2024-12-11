@@ -33,6 +33,7 @@ use turbo_tasks_hash::hash_xxh3_hash64;
 use turbopack_core::{
     chunk::{module_id_strategies::GlobalModuleIdStrategy, ChunkingType},
     context::AssetContext,
+    ident::AssetIdent,
     issue::{Issue, IssueExt},
     module::{Module, Modules},
     reference::primary_chunkable_referenced_modules,
@@ -43,7 +44,11 @@ use crate::{
     client_references::{map_client_references, ClientReferenceMapType, ClientReferencesSet},
     dynamic_imports::{map_next_dynamic, DynamicImports},
     project::Project,
-    server_actions::{map_server_actions, to_rsc_context, AllActions, AllModuleActions},
+    route::{AppPageRoute, Route},
+    server_actions::{
+        map_server_actions, server_actions_loader_modifier, to_rsc_context, AllActions,
+        AllModuleActions,
+    },
 };
 
 #[turbo_tasks::value(transparent)]
@@ -1156,17 +1161,60 @@ pub async fn get_global_module_id_strategy(
     let graph = graph_op.strongly_consistent().await?;
     let _ = graph_op.take_collectibles::<Box<dyn Issue>>();
 
+    let mut additional_idents = vec![];
+    {
+        // This is a hack for the action loader modules that are currently created ad-hoc in
+        // AppEndpoint (and not part of the module graph). Changint that is difficult because this
+        // module is created with information from the single module graph
+        /*
+        [project]/test/e2e/app-dir/app-a11y/.next-internal/server/app/page-with-h1/page/actions.js [app-rsc] (server-actions-loader, ecmascript)
+        */
+        let rsc_layer = Vc::cell("app-rsc".into());
+        let ecmascript = Vc::cell("ecmascript".into());
+        let server_action_loader_ident = |page_name: &str| {
+            let path = project
+                .project_path()
+                .join(format!(".next-internal/server/app{page_name}/actions.js").into());
+            AssetIdent::from_path(path)
+                .with_layer(rsc_layer)
+                .with_modifier(server_actions_loader_modifier())
+                .with_modifier(ecmascript)
+        };
+        for (_, route) in project.entrypoints().await?.routes.iter() {
+            match route {
+                Route::AppPage(page_routes) => {
+                    for AppPageRoute { original_name, .. } in page_routes {
+                        additional_idents.push(server_action_loader_ident(original_name));
+                    }
+                }
+                Route::AppRoute { original_name, .. } => {
+                    additional_idents.push(server_action_loader_ident(original_name));
+                }
+                _ => {}
+            }
+        }
+
+        // [project]/test/e2e/app-dir/app-a11y (server-utils)
+        //   IncludeModulesModule for all server-utilities, effectively a hardcoded vendor chunk
+        additional_idents.push(
+            AssetIdent::from_path(project.project_path())
+                .with_modifier(Vc::cell("server-utils".into())),
+        );
+    }
+
     let module_id_map: FxIndexMap<RcStr, u64> = graph
         .iter_nodes()
-        .map(|node| async move {
-            let module_ident = node.module.ident();
-            let ident_str = module_ident.to_string().await?.clone_value();
-            let hash = hash_xxh3_hash64(&ident_str);
-            Ok((ident_str, hash))
-        })
+        .map(|node| node.module.ident())
+        .chain(additional_idents)
+        .map(|ident| ident.to_string())
         .try_join()
         .await?
-        .into_iter()
+        .iter()
+        .map(|module_ident| {
+            let ident_str = module_ident.clone_value();
+            let hash = hash_xxh3_hash64(&ident_str);
+            (ident_str, hash)
+        })
         .collect();
 
     // TODO clean up this call signature

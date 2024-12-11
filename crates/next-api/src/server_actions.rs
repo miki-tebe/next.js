@@ -85,7 +85,7 @@ pub(crate) async fn create_server_actions_manifest(
 }
 
 #[turbo_tasks::function]
-fn server_actions_loader_modifier() -> Vc<RcStr> {
+pub fn server_actions_loader_modifier() -> Vc<RcStr> {
     Vc::cell("server-actions-loader".into())
 }
 
