@@ -24,8 +24,8 @@ pub fn client_modules_modifier() -> Vc<RcStr> {
 }
 
 #[turbo_tasks::function]
-pub fn client_modules_ssr_modifier() -> Vc<RcStr> {
-    Vc::cell("client modules ssr".into())
+pub fn ssr_modules_modifier() -> Vc<RcStr> {
+    Vc::cell("ssr modules".into())
 }
 
 #[turbo_tasks::value]
@@ -203,7 +203,7 @@ pub async fn get_app_client_references_chunks(
                         .entered();
 
                         let ssr_entry_module = IncludeModulesModule::new(
-                            base_ident.with_modifier(client_modules_ssr_modifier()),
+                            base_ident.with_modifier(ssr_modules_modifier()),
                             ssr_modules,
                         );
                         ssr_chunking_context.chunk_group(
