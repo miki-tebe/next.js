@@ -12,7 +12,7 @@ use turbopack_core::{
 use crate::async_chunk::chunk_item::AsyncLoaderChunkItem;
 
 #[turbo_tasks::function]
-fn modifier() -> Vc<RcStr> {
+pub fn async_loader_modifier() -> Vc<RcStr> {
     Vc::cell("async loader".into())
 }
 
@@ -42,7 +42,7 @@ impl AsyncLoaderModule {
 
     #[turbo_tasks::function]
     pub fn asset_ident_for(module: Vc<Box<dyn ChunkableModule>>) -> Vc<AssetIdent> {
-        module.ident().with_modifier(modifier())
+        module.ident().with_modifier(async_loader_modifier())
     }
 }
 

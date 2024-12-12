@@ -17,7 +17,7 @@ use next_core::{
 };
 use petgraph::{
     graph::{DiGraph, NodeIndex},
-    visit::{Dfs, VisitMap, Visitable},
+    visit::{Dfs, EdgeRef, VisitMap, Visitable},
 };
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
@@ -38,7 +38,10 @@ use turbopack_core::{
     module::{Module, Modules},
     reference::primary_chunkable_referenced_modules,
 };
-use turbopack_ecmascript::global_module_id_strategy::merge_preprocessed_module_ids;
+use turbopack_ecmascript::{
+    async_chunk::module::async_loader_modifier,
+    global_module_id_strategy::merge_preprocessed_module_ids,
+};
 
 use crate::{
     client_references::{map_client_references, ClientReferenceMapType, ClientReferencesSet},
@@ -465,6 +468,45 @@ impl SingleModuleGraph {
                 for succ in graph.neighbors(node).collect::<Vec<_>>() {
                     let succ_weight = graph.node_weight(succ).unwrap();
                     let action = visitor((Some(node_weight), succ_weight));
+                    if !discovered.is_visited(&succ) && action == GraphTraversalAction::Continue {
+                        stack.push(succ);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Traverses all edges exactly once and calls the visitor with the edge source and
+    /// target.
+    ///
+    /// This means that target nodes can be revisited (once per incoming edge).
+    pub fn traverse_edges<'a>(
+        &'a self,
+        mut visitor: impl FnMut(
+            (
+                Option<(&'a SingleModuleGraphNode, &'a ChunkingType)>,
+                &'a SingleModuleGraphNode,
+            ),
+        ) -> GraphTraversalAction,
+    ) -> Result<()> {
+        let graph = &self.graph;
+        let mut stack = self.entries.values().copied().collect::<Vec<_>>();
+        let mut discovered = graph.visit_map();
+        for entry_node in self.entries.values() {
+            let entry_weight = graph.node_weight(*entry_node).unwrap();
+            visitor((None, entry_weight));
+        }
+
+        while let Some(node) = stack.pop() {
+            let node_weight = graph.node_weight(node).unwrap();
+            if discovered.visit(node) {
+                for edge in graph.edges(node).collect::<Vec<_>>() {
+                    let edge_weight = edge.weight();
+                    let succ = edge.target();
+                    let succ_weight = graph.node_weight(succ).unwrap();
+                    let action = visitor((Some((node_weight, edge_weight)), succ_weight));
                     if !discovered.is_visited(&succ) && action == GraphTraversalAction::Continue {
                         stack.push(succ);
                     }
@@ -1202,10 +1244,24 @@ pub async fn get_global_module_id_strategy(
         );
     }
 
-    let module_id_map: FxIndexMap<RcStr, u64> = graph
-        .iter_nodes()
-        .map(|node| node.module.ident())
-        .chain(additional_idents)
+    let mut idents = additional_idents;
+    idents.extend(graph.iter_nodes().map(|node| node.module.ident()));
+
+    // Add all the modules that are inserted by chunking (i.e. async loaders)
+    graph.traverse_edges(|(parent, current)| {
+        if let Some((_, &ChunkingType::Async)) = parent {
+            idents.push(
+                current
+                    .module
+                    .ident()
+                    .with_modifier(async_loader_modifier()),
+            );
+        }
+        GraphTraversalAction::Continue
+    })?;
+
+    let module_id_map = idents
+        .into_iter()
         .map(|ident| ident.to_string())
         .try_join()
         .await?
