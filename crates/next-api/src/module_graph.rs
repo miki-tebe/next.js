@@ -1235,13 +1235,6 @@ pub async fn get_global_module_id_strategy(
                 _ => {}
             }
         }
-
-        // [project]/test/e2e/app-dir/app-a11y (server-utils)
-        //   IncludeModulesModule for all server-utilities, effectively a hardcoded vendor chunk
-        additional_idents.push(
-            AssetIdent::from_path(project.project_path())
-                .with_modifier(Vc::cell("server-utils".into())),
-        );
     }
 
     let mut idents = additional_idents;

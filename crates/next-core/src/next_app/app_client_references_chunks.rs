@@ -10,7 +10,6 @@ use turbopack_core::{
     output::OutputAssets,
 };
 
-use super::include_modules_module::IncludeModulesModule;
 use crate::{
     next_client_reference::{
         visit_client_reference::ClientReferenceGraphResult, ClientReferenceType,
@@ -202,13 +201,9 @@ pub async fn get_app_client_references_chunks(
                         )
                         .entered();
 
-                        let ssr_entry_module = IncludeModulesModule::new(
+                        ssr_chunking_context.chunk_group_multiple(
                             base_ident.with_modifier(ssr_modules_modifier()),
                             ssr_modules,
-                        );
-                        ssr_chunking_context.chunk_group(
-                            ssr_entry_module.ident(),
-                            Vc::upcast(ssr_entry_module),
                             Value::new(current_ssr_availability_info),
                         )
                     })
@@ -242,13 +237,9 @@ pub async fn get_app_client_references_chunks(
                     )
                     .entered();
 
-                    let client_entry_module = IncludeModulesModule::new(
+                    Some(client_chunking_context.chunk_group_multiple(
                         base_ident.with_modifier(client_modules_modifier()),
                         client_modules,
-                    );
-                    Some(client_chunking_context.chunk_group(
-                        client_entry_module.ident(),
-                        Vc::upcast(client_entry_module),
                         Value::new(current_client_availability_info),
                     ))
                 } else {

@@ -284,23 +284,20 @@ impl ChunkingContext for NodeJsChunkingContext {
     }
 
     #[turbo_tasks::function]
-    async fn chunk_group(
+    async fn chunk_group_multiple(
         self: Vc<Self>,
-        _ident: Vc<AssetIdent>,
-        module: ResolvedVc<Box<dyn ChunkableModule>>,
+        ident: Vc<AssetIdent>,
+        modules: Vec<ResolvedVc<Box<dyn ChunkableModule>>>,
         availability_info: Value<AvailabilityInfo>,
     ) -> Result<Vc<ChunkGroupResult>> {
-        let span = tracing::info_span!(
-            "chunking",
-            module = module.ident().to_string().await?.to_string()
-        );
+        let span = tracing::info_span!("chunking", module = ident.to_string().await?.to_string());
         async move {
             let MakeChunkGroupResult {
                 chunks,
                 availability_info,
             } = make_chunk_group(
                 Vc::upcast(self),
-                [ResolvedVc::upcast(module)],
+                modules.into_iter().map(ResolvedVc::upcast),
                 availability_info.into_value(),
             )
             .await?;

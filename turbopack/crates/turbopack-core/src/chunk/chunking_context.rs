@@ -119,6 +119,15 @@ pub trait ChunkingContext {
         ident: Vc<AssetIdent>,
         module: Vc<Box<dyn ChunkableModule>>,
         availability_info: Value<AvailabilityInfo>,
+    ) -> Vc<ChunkGroupResult> {
+        self.chunk_group_multiple(ident, vec![module], availability_info)
+    }
+
+    fn chunk_group_multiple(
+        self: Vc<Self>,
+        ident: Vc<AssetIdent>,
+        modules: Vec<Vc<Box<dyn ChunkableModule>>>,
+        availability_info: Value<AvailabilityInfo>,
     ) -> Vc<ChunkGroupResult>;
 
     fn evaluated_chunk_group(

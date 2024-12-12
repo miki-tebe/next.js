@@ -381,10 +381,10 @@ impl ChunkingContext for BrowserChunkingContext {
     }
 
     #[turbo_tasks::function]
-    async fn chunk_group(
+    async fn chunk_group_multiple(
         self: Vc<Self>,
         ident: Vc<AssetIdent>,
-        module: ResolvedVc<Box<dyn ChunkableModule>>,
+        modules: Vec<ResolvedVc<Box<dyn ChunkableModule>>>,
         availability_info: Value<AvailabilityInfo>,
     ) -> Result<Vc<ChunkGroupResult>> {
         let span = tracing::info_span!("chunking", ident = ident.to_string().await?.to_string());
@@ -396,7 +396,7 @@ impl ChunkingContext for BrowserChunkingContext {
                 availability_info,
             } = make_chunk_group(
                 Vc::upcast(self),
-                [ResolvedVc::upcast(module)],
+                modules.into_iter().map(ResolvedVc::upcast),
                 input_availability_info,
             )
             .await?;
