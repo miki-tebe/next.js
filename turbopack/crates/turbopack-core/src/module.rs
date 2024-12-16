@@ -19,6 +19,10 @@ pub trait Module: Asset {
     fn additional_layers_modules(self: Vc<Self>) -> Vc<Modules> {
         Vc::cell(vec![])
     }
+
+    fn is_self_async(self: Vc<Self>) -> Vc<bool> {
+        Vc::cell(false)
+    }
 }
 
 #[turbo_tasks::value(transparent)]

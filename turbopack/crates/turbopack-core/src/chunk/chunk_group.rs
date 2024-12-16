@@ -7,12 +7,13 @@ use turbo_tasks::{
 };
 
 use super::{
-    availability_info::AvailabilityInfo, available_chunk_items::AvailableChunkItemInfo,
-    chunk_content, chunking::make_chunks, AsyncModuleInfo, Chunk, ChunkContentResult, ChunkItem,
+    availability_info::AvailabilityInfo, available_modules::AvailableModulesInfo, chunk_content,
+    chunking::make_chunks, AsyncModuleInfo, Chunk, ChunkContentResult, ChunkItem, ChunkableModule,
     ChunkingContext,
 };
 use crate::{
-    module::Module, output::OutputAssets, rebase::RebasedAsset, reference::ModuleReference,
+    environment::ChunkLoading, module::Module, output::OutputAssets, rebase::RebasedAsset,
+    reference::ModuleReference,
 };
 
 pub struct MakeChunkGroupResult {
@@ -26,24 +27,35 @@ pub async fn make_chunk_group(
     chunk_group_entries: impl IntoIterator<Item = ResolvedVc<Box<dyn Module>>>,
     availability_info: AvailabilityInfo,
 ) -> Result<MakeChunkGroupResult> {
+    let can_split_async = matches!(
+        *chunking_context.environment().chunk_loading().await?,
+        ChunkLoading::Edge
+    );
+
     let ChunkContentResult {
-        chunk_items,
-        external_output_assets,
+        chunkable_modules,
         external_module_references,
         async_modules,
         traced_modules,
         forward_edges_inherit_async,
         local_back_edges_inherit_async,
         available_async_modules_back_edges_inherit_async,
-    } = chunk_content(chunking_context, chunk_group_entries, availability_info).await?;
+    } = chunk_content(
+        chunk_group_entries,
+        availability_info,
+        can_split_async,
+        *chunking_context.is_tracing_enabled().await?,
+    )
+    .await?;
+    let external_output_assets = OutputAssets::empty();
 
     // Find all local chunk items that are self async
-    let self_async_children = chunk_items
+    let self_async_children = chunkable_modules
         .iter()
         .copied()
-        .map(|chunk_item| async move {
-            let is_self_async = *chunk_item.is_self_async().await?;
-            Ok(is_self_async.then_some(chunk_item))
+        .map(|m| async move {
+            let is_self_async = *m.is_self_async().await?;
+            Ok(is_self_async.then_some(m))
         })
         .try_flat_join()
         .await?;
@@ -53,7 +65,7 @@ pub async fn make_chunk_group(
         .keys()
         .copied()
         .chain(self_async_children.into_iter())
-        .map(|chunk_item| (chunk_item, AutoSet::<Vc<Box<dyn ChunkItem>>>::new()))
+        .map(|m| (m, AutoSet::<Vc<Box<dyn ChunkableModule>>>::new()))
         .collect::<FxIndexMap<_, _>>();
 
     // Propagate async inheritance
@@ -83,9 +95,9 @@ pub async fn make_chunk_group(
     }
 
     // Create map for chunk items with empty [Option<Vc<AsyncModuleInfo>>]
-    let mut chunk_items = chunk_items
+    let mut modules = chunkable_modules
         .into_iter()
-        .map(|chunk_item| (chunk_item, None))
+        .map(|m| (m, None))
         .collect::<FxIndexMap<_, Option<Vc<AsyncModuleInfo>>>>();
 
     // Insert AsyncModuleInfo for every async module
@@ -100,7 +112,7 @@ pub async fn make_chunk_group(
             } else {
                 Default::default()
             };
-        chunk_items.insert(
+        modules.insert(
             async_item,
             Some(AsyncModuleInfo::new(referenced_async_modules)),
         );
@@ -108,12 +120,12 @@ pub async fn make_chunk_group(
 
     // Compute new [AvailabilityInfo]
     let availability_info = {
-        let map = chunk_items
+        let map = modules
             .iter()
-            .map(|(&chunk_item, async_info)| async move {
+            .map(|(&module, async_info)| async move {
                 Ok((
-                    chunk_item.to_resolved().await?,
-                    AvailableChunkItemInfo {
+                    module.to_resolved().await?,
+                    AvailableModulesInfo {
                         is_async: async_info.is_some(),
                     },
                 ))
@@ -123,7 +135,7 @@ pub async fn make_chunk_group(
             .into_iter()
             .collect();
         let map = Vc::cell(map);
-        availability_info.with_chunk_items(map).await?
+        availability_info.with_modules(map).await?
     };
 
     // Insert async chunk loaders for every referenced async module
@@ -173,10 +185,15 @@ pub async fn make_chunk_group(
 
     referenced_output_assets.extend(rebased_modules.into_iter().map(ResolvedVc::upcast));
 
+    let chunk_items = modules
+        .iter()
+        .map(|(m, async_info)| (m.as_chunk_item(chunking_context), *async_info))
+        .collect::<Vec<_>>();
+
     // Pass chunk items to chunking algorithm
     let mut chunks = make_chunks(
         chunking_context,
-        Vc::cell(chunk_items.into_iter().collect()),
+        Vc::cell(chunk_items),
         "".into(),
         Vc::cell(referenced_output_assets),
     )
