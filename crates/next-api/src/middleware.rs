@@ -64,7 +64,7 @@ impl MiddlewareEndpoint {
     }
 
     #[turbo_tasks::function]
-    async fn edge_files(&self) -> Result<Vc<OutputAssets>> {
+    async fn entry_module(&self) -> Vc<Box<dyn Module>> {
         let userland_module = self
             .asset_context
             .process(
@@ -79,22 +79,28 @@ impl MiddlewareEndpoint {
             userland_module,
         );
 
-        let module = wrap_edge_entry(
+        wrap_edge_entry(
             *self.asset_context,
             self.project.project_path(),
             module,
             "middleware".into(),
-        );
+        )
+    }
+
+    #[turbo_tasks::function]
+    async fn edge_files(self: Vc<Self>) -> Result<Vc<OutputAssets>> {
+        let this = self.await?;
+        let module = self.entry_module();
 
         let mut evaluatable_assets = get_server_runtime_entries(
             Value::new(ServerContextType::Middleware {
-                app_dir: self.app_dir,
-                ecmascript_client_reference_transition_name: self
+                app_dir: this.app_dir,
+                ecmascript_client_reference_transition_name: this
                     .ecmascript_client_reference_transition_name,
             }),
-            self.project.next_mode(),
+            this.project.next_mode(),
         )
-        .resolve_entries(*self.asset_context)
+        .resolve_entries(*this.asset_context)
         .await?
         .clone_value();
 
@@ -109,7 +115,7 @@ impl MiddlewareEndpoint {
             .context("Entry module must be evaluatable")?;
         evaluatable_assets.push(evaluatable.to_resolved().await?);
 
-        let edge_chunking_context = self.project.edge_chunking_context(false);
+        let edge_chunking_context = this.project.edge_chunking_context(false);
 
         let edge_files = edge_chunking_context.evaluated_chunk_group_assets(
             module.ident(),
@@ -321,6 +327,6 @@ impl Endpoint for MiddlewareEndpoint {
 
     #[turbo_tasks::function]
     async fn root_modules(self: Vc<Self>) -> Result<Vc<Modules>> {
-        Ok(Vc::cell(vec![self.userland_module().to_resolved().await?]))
+        Ok(Vc::cell(vec![self.entry_module().to_resolved().await?]))
     }
 }
