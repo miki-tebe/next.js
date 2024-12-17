@@ -33,7 +33,6 @@ use turbo_tasks_hash::hash_xxh3_hash64;
 use turbopack_core::{
     chunk::{module_id_strategies::GlobalModuleIdStrategy, ChunkingType},
     context::AssetContext,
-    ident::AssetIdent,
     issue::{Issue, IssueExt},
     module::{Module, Modules},
     reference::primary_chunkable_referenced_modules,
@@ -47,11 +46,7 @@ use crate::{
     client_references::{map_client_references, ClientReferenceMapType, ClientReferencesSet},
     dynamic_imports::{map_next_dynamic, DynamicImports},
     project::Project,
-    route::{AppPageRoute, Route},
-    server_actions::{
-        map_server_actions, server_actions_loader_modifier, to_rsc_context, AllActions,
-        AllModuleActions,
-    },
+    server_actions::{map_server_actions, to_rsc_context, AllActions, AllModuleActions},
 };
 
 #[turbo_tasks::value(transparent)]
@@ -594,9 +589,17 @@ impl SingleModuleGraph {
         SingleModuleGraph::new_inner(None, &*entries.await?, &Default::default()).await
     }
 
-    /// `root` is connected to the entries and include in `self.entries`.
     #[turbo_tasks::function]
     async fn new_with_entries_visited(
+        entries: Vc<Modules>,
+        visited_modules: Vc<ModuleSet>,
+    ) -> Result<Vc<Self>> {
+        SingleModuleGraph::new_inner(None, &*entries.await?, &*visited_modules.await?).await
+    }
+
+    /// `root` is connected to the entries and include in `self.entries`.
+    #[turbo_tasks::function]
+    async fn new_with_entries_visited_root(
         root: ResolvedVc<Box<dyn Module>>,
         // This must not be a Vc<Vec<_>> to ensure layout segment optimization hits the cache
         entries: Vec<ResolvedVc<Box<dyn Module>>>,
@@ -619,7 +622,7 @@ async fn get_module_graph_for_endpoint(
     let mut graphs = vec![];
 
     let mut visited_modules = if !server_utils.is_empty() {
-        let graph = SingleModuleGraph::new_with_entries_visited(
+        let graph = SingleModuleGraph::new_with_entries_visited_root(
             *entry,
             server_utils.iter().map(|m| **m).collect(),
             Vc::cell(Default::default()),
@@ -641,7 +644,7 @@ async fn get_module_graph_for_endpoint(
         .iter()
         .map(|m| ResolvedVc::upcast::<Box<dyn Module>>(*m))
     {
-        let graph = SingleModuleGraph::new_with_entries_visited(
+        let graph = SingleModuleGraph::new_with_entries_visited_root(
             *entry,
             vec![*module],
             Vc::cell(visited_modules.clone()),
@@ -654,7 +657,7 @@ async fn get_module_graph_for_endpoint(
 
     // The previous iterations above (might) have added the entry node, but not actually visited it.
     visited_modules.remove(&entry);
-    let graph = SingleModuleGraph::new_with_entries_visited(
+    let graph = SingleModuleGraph::new_with_entries_visited_root(
         *entry,
         vec![*entry],
         Vc::cell(visited_modules.clone()),
@@ -667,8 +670,48 @@ async fn get_module_graph_for_endpoint(
 }
 
 #[turbo_tasks::function]
-async fn get_module_graph_for_project(project: ResolvedVc<Project>) -> Vc<SingleModuleGraph> {
-    SingleModuleGraph::new_with_entries(project.get_all_entries())
+async fn get_module_graph_for_project(
+    project: ResolvedVc<Project>,
+) -> Result<Vc<SingleModuleGraphs>> {
+    let entries = project.get_all_entries();
+    let graph = SingleModuleGraph::new_with_entries(entries)
+        .to_resolved()
+        .await?;
+    let visited_modules: HashSet<_> = graph.await?.iter_nodes().map(|n| n.module).collect();
+
+    let graphs = {
+        let server_actions = async {
+            [graph]
+                .iter()
+                .map(|graph| ServerActionsGraph::new_with_entries(**graph, false).to_resolved())
+                .try_join()
+                .await
+        }
+        .instrument(tracing::info_span!("generating server actions graphs"))
+        .await?;
+
+        // TODO properly generate everything here
+        ReducedGraphs {
+            next_dynamic: vec![],
+            server_actions,
+            client_references: vec![],
+        }
+        .cell()
+    };
+
+    let entries = entries.await?;
+    let additional_entries = project.get_all_additional_entries(graphs).await?;
+    let collect = entries
+        .iter()
+        .copied()
+        .chain(additional_entries.iter().copied())
+        .collect();
+    let extended_graph =
+        SingleModuleGraph::new_with_entries_visited(Vc::cell(collect), Vc::cell(visited_modules))
+            .to_resolved()
+            .await?;
+
+    Ok(Vc::cell(vec![graph, extended_graph]))
 }
 
 #[turbo_tasks::value]
@@ -1117,11 +1160,10 @@ async fn get_reduced_graphs_for_endpoint_inner(
         ),
         NextMode::Build => (
             false,
-            vec![
-                async move { get_module_graph_for_project(project).to_resolved().await }
-                    .instrument(tracing::info_span!("module graph for app"))
-                    .await?,
-            ],
+            async move { get_module_graph_for_project(project).await }
+                .instrument(tracing::info_span!("module graph for app"))
+                .await?
+                .clone_value(),
         ),
     };
 
@@ -1200,58 +1242,31 @@ pub async fn get_global_module_id_strategy(
     let graph_op = get_module_graph_for_project(project);
     // TODO get rid of this function once everything inside of
     // `get_reduced_graphs_for_endpoint_inner` calls `take_collectibles()` when needed
-    let graph = graph_op.strongly_consistent().await?;
+    let graphs = graph_op.strongly_consistent().await?;
     let _ = graph_op.take_collectibles::<Box<dyn Issue>>();
 
-    let mut additional_idents = vec![];
-    {
-        // This is a hack for the action loader modules that are currently created ad-hoc in
-        // AppEndpoint (and not part of the module graph). Changint that is difficult because this
-        // module is created with information from the single module graph
-        /*
-        [project]/test/e2e/app-dir/app-a11y/.next-internal/server/app/page-with-h1/page/actions.js [app-rsc] (server-actions-loader, ecmascript)
-        */
-        let rsc_layer = Vc::cell("app-rsc".into());
-        let ecmascript = Vc::cell("ecmascript".into());
-        let server_action_loader_ident = |page_name: &str| {
-            let path = project
-                .project_path()
-                .join(format!(".next-internal/server/app{page_name}/actions.js").into());
-            AssetIdent::from_path(path)
-                .with_layer(rsc_layer)
-                .with_modifier(server_actions_loader_modifier())
-                .with_modifier(ecmascript)
-        };
-        for (_, route) in project.entrypoints().await?.routes.iter() {
-            match route {
-                Route::AppPage(page_routes) => {
-                    for AppPageRoute { original_name, .. } in page_routes {
-                        additional_idents.push(server_action_loader_ident(original_name));
-                    }
-                }
-                Route::AppRoute { original_name, .. } => {
-                    additional_idents.push(server_action_loader_ident(original_name));
-                }
-                _ => {}
+    let graphs = graphs.iter().try_join().await?;
+
+    let mut idents: Vec<_> = graphs
+        .iter()
+        .flat_map(|graph| graph.iter_nodes())
+        .map(|node| node.module.ident())
+        .collect();
+
+    for graph in graphs.iter() {
+        // Add all the modules that are inserted by chunking (i.e. async loaders)
+        graph.traverse_edges(|(parent, current)| {
+            if let Some((_, &ChunkingType::Async)) = parent {
+                idents.push(
+                    current
+                        .module
+                        .ident()
+                        .with_modifier(async_loader_modifier()),
+                );
             }
-        }
+            GraphTraversalAction::Continue
+        })?;
     }
-
-    let mut idents = additional_idents;
-    idents.extend(graph.iter_nodes().map(|node| node.module.ident()));
-
-    // Add all the modules that are inserted by chunking (i.e. async loaders)
-    graph.traverse_edges(|(parent, current)| {
-        if let Some((_, &ChunkingType::Async)) = parent {
-            idents.push(
-                current
-                    .module
-                    .ident()
-                    .with_modifier(async_loader_modifier()),
-            );
-        }
-        GraphTraversalAction::Continue
-    })?;
 
     let module_id_map = idents
         .into_iter()

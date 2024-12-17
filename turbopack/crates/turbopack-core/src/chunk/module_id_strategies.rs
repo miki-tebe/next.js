@@ -57,22 +57,19 @@ impl ModuleIdStrategy for GlobalModuleIdStrategy {
 
         // This shouldn't happen
         // It means we missed something when generating the map
-        // TODO generating the server-actions-loader ident is non-trivial due to subassets
-        if !ident_string.contains("server-actions-loader") {
-            ModuleIssue {
-                ident: ident.to_resolved().await?,
-                title: StyledString::Text(
-                    format!("ModuleId not found for ident: {:?}", ident_string).into(),
-                )
-                .resolved_cell(),
-                description: StyledString::Text(
-                    format!("ModuleId not found for ident: {:?}", ident_string).into(),
-                )
-                .resolved_cell(),
-            }
-            .resolved_cell()
-            .emit();
+        ModuleIssue {
+            ident: ident.to_resolved().await?,
+            title: StyledString::Text(
+                format!("ModuleId not found for ident: {:?}", ident_string).into(),
+            )
+            .resolved_cell(),
+            description: StyledString::Text(
+                format!("ModuleId not found for ident: {:?}", ident_string).into(),
+            )
+            .resolved_cell(),
         }
+        .resolved_cell()
+        .emit();
 
         Ok(ModuleId::String(
             hash_xxh3_hash64(ident.to_string().await?)

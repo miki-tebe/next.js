@@ -66,9 +66,9 @@ use crate::{
     entrypoints::Entrypoints,
     instrumentation::InstrumentationEndpoint,
     middleware::MiddlewareEndpoint,
-    module_graph::get_global_module_id_strategy,
+    module_graph::{get_global_module_id_strategy, ReducedGraphs},
     pages::PagesProject,
-    route::{AppPageRoute, Endpoint, Route},
+    route::{AppPageRoute, Endpoint, Endpoints, Route},
     versioned_content_map::{OutputAssetsOperation, VersionedContentMap},
 };
 
@@ -686,36 +686,22 @@ impl Project {
     }
 
     #[turbo_tasks::function]
-    pub async fn get_all_entries(self: Vc<Self>) -> Result<Vc<Modules>> {
-        let mut modules = Vec::new();
-
-        async fn add_endpoint(
-            endpoint: Vc<Box<dyn Endpoint>>,
-            modules: &mut Vec<ResolvedVc<Box<dyn Module>>>,
-        ) -> Result<()> {
-            let root_modules = endpoint.root_modules().await?;
-            modules.extend(root_modules.iter().copied());
-            Ok(())
-        }
-
-        modules.extend(self.client_main_modules().await?.iter().copied());
+    pub async fn get_all_endpoints(self: Vc<Self>) -> Result<Vc<Endpoints>> {
+        let mut endpoints = vec![];
 
         let entrypoints = self.entrypoints().await?;
 
-        modules.extend(self.client_main_modules().await?.iter().copied());
-        add_endpoint(*entrypoints.pages_error_endpoint, &mut modules).await?;
-        add_endpoint(*entrypoints.pages_app_endpoint, &mut modules).await?;
-        add_endpoint(*entrypoints.pages_document_endpoint, &mut modules).await?;
+        endpoints.push(entrypoints.pages_error_endpoint);
+        endpoints.push(entrypoints.pages_app_endpoint);
+        endpoints.push(entrypoints.pages_document_endpoint);
 
         if let Some(middleware) = &entrypoints.middleware {
-            add_endpoint(middleware.endpoint, &mut modules).await?;
+            endpoints.push(middleware.endpoint.to_resolved().await?);
         }
 
         if let Some(instrumentation) = &entrypoints.instrumentation {
-            let node_js = instrumentation.node_js;
-            let edge = instrumentation.edge;
-            add_endpoint(node_js, &mut modules).await?;
-            add_endpoint(edge, &mut modules).await?;
+            endpoints.push(instrumentation.node_js.to_resolved().await?);
+            endpoints.push(instrumentation.edge.to_resolved().await?);
         }
 
         for (_, route) in entrypoints.routes.iter() {
@@ -724,10 +710,10 @@ impl Project {
                     html_endpoint,
                     data_endpoint: _,
                 } => {
-                    add_endpoint(**html_endpoint, &mut modules).await?;
+                    endpoints.push(*html_endpoint);
                 }
                 Route::PageApi { endpoint } => {
-                    add_endpoint(**endpoint, &mut modules).await?;
+                    endpoints.push(*endpoint);
                 }
                 Route::AppPage(page_routes) => {
                     for AppPageRoute {
@@ -736,14 +722,14 @@ impl Project {
                         rsc_endpoint: _,
                     } in page_routes
                     {
-                        add_endpoint(*html_endpoint, &mut modules).await?;
+                        endpoints.push(html_endpoint.to_resolved().await?);
                     }
                 }
                 Route::AppRoute {
                     original_name: _,
                     endpoint,
                 } => {
-                    add_endpoint(**endpoint, &mut modules).await?;
+                    endpoints.push(*endpoint);
                 }
                 Route::Conflict => {
                     tracing::info!("WARN: conflict");
@@ -751,6 +737,41 @@ impl Project {
             }
         }
 
+        Ok(Vc::cell(endpoints))
+    }
+
+    #[turbo_tasks::function]
+    pub async fn get_all_entries(self: Vc<Self>) -> Result<Vc<Modules>> {
+        let mut modules: Vec<ResolvedVc<Box<dyn Module>>> = self
+            .get_all_endpoints()
+            .await?
+            .iter()
+            .map(|endpoint| endpoint.root_modules())
+            .try_flat_join()
+            .await?
+            .into_iter()
+            .copied()
+            .collect();
+        modules.extend(self.client_main_modules().await?.iter().copied());
+        Ok(Vc::cell(modules))
+    }
+
+    #[turbo_tasks::function]
+    pub async fn get_all_additional_entries(
+        self: Vc<Self>,
+        graphs: Vc<ReducedGraphs>,
+    ) -> Result<Vc<Modules>> {
+        let mut modules: Vec<ResolvedVc<Box<dyn Module>>> = self
+            .get_all_endpoints()
+            .await?
+            .iter()
+            .map(|endpoint| endpoint.additional_root_modules(graphs))
+            .try_flat_join()
+            .await?
+            .into_iter()
+            .copied()
+            .collect();
+        modules.extend(self.client_main_modules().await?.iter().copied());
         Ok(Vc::cell(modules))
     }
 

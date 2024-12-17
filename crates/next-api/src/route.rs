@@ -6,7 +6,7 @@ use turbo_tasks::{
 };
 use turbopack_core::module::Modules;
 
-use crate::paths::ServerPath;
+use crate::{module_graph::ReducedGraphs, paths::ServerPath};
 
 #[derive(TraceRawVcs, Serialize, Deserialize, PartialEq, Eq, ValueDebugFormat, Clone, Debug)]
 pub struct AppPageRoute {
@@ -63,8 +63,17 @@ pub trait Endpoint {
     fn write_to_disk(self: Vc<Self>) -> Vc<WrittenEndpoint>;
     fn server_changed(self: Vc<Self>) -> Vc<Completion>;
     fn client_changed(self: Vc<Self>) -> Vc<Completion>;
+    /// The entry modules for the single modules graph.
     fn root_modules(self: Vc<Self>) -> Vc<Modules>;
+    /// Additional entry modules for the single module graph.
+    /// This may read the single module graph and return additional modules.
+    fn additional_root_modules(self: Vc<Self>, _graphs: Vc<ReducedGraphs>) -> Vc<Modules> {
+        Modules::empty()
+    }
 }
+
+#[turbo_tasks::value(transparent, local)]
+pub struct Endpoints(Vec<ResolvedVc<Box<dyn Endpoint>>>);
 
 #[turbo_tasks::value(shared)]
 #[derive(Debug, Clone)]

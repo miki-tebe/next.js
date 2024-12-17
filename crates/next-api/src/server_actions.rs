@@ -85,7 +85,7 @@ pub(crate) async fn create_server_actions_manifest(
 }
 
 #[turbo_tasks::function]
-pub fn server_actions_loader_modifier() -> Vc<RcStr> {
+fn server_actions_loader_modifier() -> Vc<RcStr> {
     Vc::cell("server-actions-loader".into())
 }
 
@@ -96,7 +96,7 @@ pub fn server_actions_loader_modifier() -> Vc<RcStr> {
 /// file's name and the action name). This hash matches the id sent to the
 /// client and present inside the paired manifest.
 #[turbo_tasks::function]
-async fn build_server_actions_loader(
+pub(crate) async fn build_server_actions_loader(
     project_path: Vc<FileSystemPath>,
     page_name: RcStr,
     actions: Vc<AllActions>,
