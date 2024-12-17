@@ -703,6 +703,46 @@ async fn get_module_graph_for_project(project: ResolvedVc<Project>) -> Vc<Single
     SingleModuleGraph::new_with_entries(project.get_all_entries())
 }
 
+#[turbo_tasks::function]
+async fn get_additional_module_graph_for_project(
+    project: ResolvedVc<Project>,
+    graph: Vc<SingleModuleGraph>,
+) -> Result<Vc<SingleModuleGraph>> {
+    let visited_modules: HashSet<_> = graph.await?.iter_nodes().map(|n| n.module).collect();
+    let entries = project.get_all_entries().await?;
+    let additional_entries = project
+        .get_all_additional_entries({
+            let server_actions = vec![
+                async {
+                    ServerActionsGraph::new_with_entries(graph, false)
+                        .to_resolved()
+                        .await
+                }
+                .instrument(tracing::info_span!("generating server actions graphs"))
+                .await?,
+            ];
+
+            // TODO use real object here once client_asset_context is gone
+            ReducedGraphs {
+                next_dynamic: vec![],
+                server_actions,
+                client_references: vec![],
+            }
+            .cell()
+        })
+        .await?;
+    let collect = entries
+        .iter()
+        .copied()
+        .chain(additional_entries.iter().copied())
+        .collect();
+
+    Ok(SingleModuleGraph::new_with_entries_visited(
+        Vc::cell(collect),
+        Vc::cell(visited_modules),
+    ))
+}
+
 #[turbo_tasks::value]
 pub struct NextDynamicGraph {
     is_single_page: bool,
@@ -1230,45 +1270,16 @@ pub async fn get_global_module_id_strategy(
     project: Vc<Project>,
 ) -> Result<Vc<GlobalModuleIdStrategy>> {
     let graph_op = get_module_graph_for_project(project);
-    // TODO get rid of this function once everything inside of
-    // `get_reduced_graphs_for_endpoint_inner` calls `take_collectibles()` when needed
+    // TODO get rid of this once everything inside calls `take_collectibles()` when needed
     let graph = graph_op.strongly_consistent().await?;
     let _ = graph_op.take_collectibles::<Box<dyn Issue>>();
 
-    let extended_graph = {
-        let visited_modules: HashSet<_> = graph.iter_nodes().map(|n| n.module).collect();
-        let entries = project.get_all_entries().await?;
-        let additional_entries = project
-            .get_all_additional_entries({
-                let server_actions = vec![
-                    async {
-                        ServerActionsGraph::new_with_entries(graph_op, false)
-                            .to_resolved()
-                            .await
-                    }
-                    .instrument(tracing::info_span!("generating server actions graphs"))
-                    .await?,
-                ];
+    let additional_graph_op = get_additional_module_graph_for_project(project, graph_op);
+    // TODO get rid of this once everything inside calls `take_collectibles()` when needed
+    let additional_graph = additional_graph_op.strongly_consistent().await?;
+    let _ = additional_graph_op.take_collectibles::<Box<dyn Issue>>();
 
-                // TODO use real object here once client_asset_context is gone
-                ReducedGraphs {
-                    next_dynamic: vec![],
-                    server_actions,
-                    client_references: vec![],
-                }
-                .cell()
-            })
-            .await?;
-        let collect = entries
-            .iter()
-            .copied()
-            .chain(additional_entries.iter().copied())
-            .collect();
-        SingleModuleGraph::new_with_entries_visited(Vc::cell(collect), Vc::cell(visited_modules))
-            .await?
-    };
-
-    let graphs = [graph, extended_graph];
+    let graphs = [graph, additional_graph];
 
     let mut idents: Vec<_> = graphs
         .iter()
